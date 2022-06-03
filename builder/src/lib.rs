@@ -60,8 +60,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         let name = &f.ident;
                         let ty = &f.ty;
                         quote! {
-                            pub fn #name(&mut self, #name: #ty) {
+                            pub fn #name(&mut self, #name: #ty) -> #struct_name_builder {
                                 self.#name = Some(#name);
+                                self.clone()
                             }
                         }
                     })
@@ -109,6 +110,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
+        #[derive(Clone)]
         pub struct #struct_name_builder {
             #( #namedfields )*
         }

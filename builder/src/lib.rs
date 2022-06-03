@@ -38,9 +38,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .iter()
                     .map(|f| {
                         let name = &f.ident;
-                        let ty = &f.ty;
                         quote! {
                             #name: None,
+                        }
+                    })
+                    .collect(),
+                _ => unimplemented!(),
+            }
+        }
+        _ => unimplemented!(),
+    };
+
+    let setter_methods: Vec<proc_macro2::TokenStream> = match input.data {
+        Data::Struct(ref s) => {
+            struct_name_builder = format_ident!("{}Builder", input.ident);
+            match s.fields {
+                Fields::Named(ref fieldsnamed) => fieldsnamed
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let name = &f.ident;
+                        let ty = &f.ty;
+                        quote! {
+                            pub fn #name(&mut self, #name: #ty) {
+                                self.#name = Some(#name);
+                            }
                         }
                     })
                     .collect(),
@@ -52,6 +74,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         pub struct #struct_name_builder {
             #( #namedfields )*
+        }
+
+        impl #struct_name_builder {
+            #( #setter_methods )*
         }
 
         impl #original_struct_name {

@@ -20,7 +20,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         let name = &f.ident;
                         let ty = &f.ty;
                         quote! {
-                            #name: std::option::Option<#ty>,
+                            pub #name: std::option::Option<#ty>,
                         }
                     })
                     .collect(),
@@ -71,6 +71,43 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         _ => unimplemented!(),
     };
+
+    let check_has_values: Vec<proc_macro2::TokenStream> = match input.data {
+        Data::Struct(ref s) => match s.fields {
+            Fields::Named(ref fieldsnamed) => fieldsnamed
+                .named
+                .iter()
+                .map(|f| {
+                    let name = &f.ident;
+                    quote! {
+                        if let None = self.#name {
+                            return Err(String::from(stringify!(missing #name)).into());
+                        }
+                    }
+                })
+                .collect(),
+            _ => unimplemented!(),
+        },
+        _ => unimplemented!(),
+    };
+
+    let fields_init: Vec<proc_macro2::TokenStream> = match input.data {
+        Data::Struct(ref s) => match s.fields {
+            Fields::Named(ref fieldsnamed) => fieldsnamed
+                .named
+                .iter()
+                .map(|f| {
+                    let name = &f.ident;
+                    quote! {
+                        #name : self.#name.unwrap(),
+                    }
+                })
+                .collect(),
+            _ => unimplemented!(),
+        },
+        _ => unimplemented!(),
+    };
+
     let expanded = quote! {
         pub struct #struct_name_builder {
             #( #namedfields )*
@@ -78,6 +115,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #struct_name_builder {
             #( #setter_methods )*
+
+            pub fn build(self) -> Result<#original_struct_name, Box<dyn std::error::Error>> {
+                #( #check_has_values )*
+                Ok( #original_struct_name {
+                    #( #fields_init )*
+                })
+
+            }
         }
 
         impl #original_struct_name {

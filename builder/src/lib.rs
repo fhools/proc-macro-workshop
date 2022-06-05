@@ -2,8 +2,46 @@ use proc_macro::TokenStream;
 use quote::format_ident;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
-use syn::{Data, Fields};
+use syn::{
+    AngleBracketedGenericArguments, Data, Fields, GenericArgument, PathArguments, Type, TypePath,
+};
 extern crate proc_macro;
+fn is_optional_ty(ty: &Type) -> bool {
+    if let Type::Path(TypePath { ref path, .. }) = ty {
+        if path.segments.first().unwrap().ident == "Option" {
+            if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                ref args, ..
+            }) = path.segments.first().unwrap().arguments
+            {
+                if let GenericArgument::Type(Type::Path(TypePath { ref path, .. })) =
+                    args.first().unwrap()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+fn option_inner_ty(ty: &Type) -> &syn::Ident {
+    if let Type::Path(TypePath { ref path, .. }) = ty {
+        if path.segments.first().unwrap().ident == "Option" {
+            if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                ref args, ..
+            }) = path.segments.first().unwrap().arguments
+            {
+                if let GenericArgument::Type(Type::Path(TypePath { ref path, .. })) =
+                    args.first().unwrap()
+                {
+                    let inner_ty = &path.segments.first().unwrap().ident;
+                    return inner_ty;
+                }
+            }
+        }
+    }
+    panic!("tried to get non-optional inner type");
+}
+
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -19,9 +57,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .map(|f| {
                         let name = &f.ident;
                         let ty = &f.ty;
-                        quote! {
-                            pub #name: std::option::Option<#ty>,
+                        let mut field_decl = Default::default();
+                        if let Type::Path(TypePath { ref path, .. }) = ty {
+                            if path.segments.first().unwrap().ident == "Option" {
+                                if let PathArguments::AngleBracketed(
+                                    AngleBracketedGenericArguments { ref args, .. },
+                                ) = path.segments.first().unwrap().arguments
+                                {
+                                    if let GenericArgument::Type(Type::Path(TypePath {
+                                        ref path,
+                                        ..
+                                    })) = args.first().unwrap()
+                                    {
+                                        let inner_ty = &path.segments.first().unwrap().ident;
+                                        field_decl = quote! {
+                                            pub #name: std::option::Option<#inner_ty>,
+                                        };
+                                    }
+                                }
+                            } else {
+                                field_decl = quote! {
+                                    pub #name: std::option::Option<#ty>,
+                                };
+                            }
                         }
+                        field_decl
                     })
                     .collect(),
                 _ => unimplemented!(),
@@ -59,10 +119,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .map(|f| {
                         let name = &f.ident;
                         let ty = &f.ty;
-                        quote! {
-                            pub fn #name(&mut self, #name: #ty) -> #struct_name_builder {
-                                self.#name = Some(#name);
-                                self.clone()
+                        if is_optional_ty(ty) {
+                            let inner_ty = option_inner_ty(ty);
+                            quote! {
+                                pub fn #name(&mut self, #name: #inner_ty) -> #struct_name_builder {
+                                    self.#name = Some(#name);
+                                    self.clone()
+                                }
+                            }
+                        } else {
+                            quote! {
+                                pub fn #name(&mut self, #name: #ty) -> #struct_name_builder {
+                                    self.#name = Some(#name);
+                                    self.clone()
+                                }
                             }
                         }
                     })
@@ -78,6 +148,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
             Fields::Named(ref fieldsnamed) => fieldsnamed
                 .named
                 .iter()
+                .filter(|f| match f.ty {
+                    Type::Path(TypePath { ref path, .. }) => {
+                        !(path.segments.first().unwrap().ident == "Option")
+                    }
+                    _ => true,
+                })
                 .map(|f| {
                     let name = &f.ident;
                     quote! {
@@ -99,8 +175,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 .iter()
                 .map(|f| {
                     let name = &f.ident;
-                    quote! {
-                        #name : self.#name.unwrap(),
+                    let ty = &f.ty;
+                    if is_optional_ty(ty) {
+                        quote! {
+                            #name : self.#name,
+                        }
+                    } else {
+                        quote! {
+                            #name : self.#name.unwrap(),
+                        }
                     }
                 })
                 .collect(),

@@ -1,9 +1,12 @@
 use proc_macro::TokenStream;
 use quote::format_ident;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use quote::TokenStreamExt;
+use syn::Error;
+use syn::{parenthesized, parse::Parse, parse::ParseStream, parse_macro_input, DeriveInput, Token};
 use syn::{
-    AngleBracketedGenericArguments, Data, Fields, GenericArgument, PathArguments, Type, TypePath,
+    AngleBracketedGenericArguments, Data, Fields, GenericArgument, Ident, PathArguments, Type,
+    TypePath,
 };
 extern crate proc_macro;
 fn is_optional_ty(ty: &Type) -> bool {
@@ -42,7 +45,69 @@ fn option_inner_ty(ty: &Type) -> &syn::Ident {
     panic!("tried to get non-optional inner type");
 }
 
-#[proc_macro_derive(Builder)]
+fn vec_inner_ty(ty: &Type) -> &syn::Ident {
+    if let Type::Path(TypePath { ref path, .. }) = ty {
+        if path.segments.first().unwrap().ident == "Vec" {
+            if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                ref args, ..
+            }) = path.segments.first().unwrap().arguments
+            {
+                if let GenericArgument::Type(Type::Path(TypePath { ref path, .. })) =
+                    args.first().unwrap()
+                {
+                    let inner_ty = &path.segments.first().unwrap().ident;
+                    return inner_ty;
+                }
+            }
+        }
+    }
+    panic!("tried to get non-vec inner type");
+}
+#[derive(Debug, Default)]
+struct BuilderAttr {
+    method_name: String,
+    is_same: bool,
+}
+
+impl Parse for BuilderAttr {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let content;
+        parenthesized!(content in input);
+        eprintln!("content: {}", content);
+        let ident: Ident = content.parse()?;
+        if ident != "each" {
+            return Err(Error::new(ident.span(), "expected each"));
+        }
+        let equals: Token![=] = content.parse()?;
+        let method_name: syn::LitStr = content.parse()?;
+        eprintln!("builder ident = {}", ident);
+        eprintln!("equals = {:?}", equals);
+        eprintln!("litstr = {:?}", method_name);
+        Ok(BuilderAttr {
+            method_name: method_name.value(),
+            is_same: false,
+        })
+    }
+}
+
+
+fn has_builder_same_name(name: &Option<Ident>, attrs: &Vec<syn::Attribute>) -> bool {
+    if attrs.len() > 0
+        && attrs[0].path.segments.first().unwrap().ident == "builder"
+    {
+        eprintln!(
+            "===ATTRS=== path: {:?} tokens: {}",
+            attrs[0].path, attrs[0].tokens
+        );
+        let attr_tokens = attrs[0].tokens.clone().into();
+        let builder_attr : BuilderAttr = syn::parse(attr_tokens).unwrap();
+        let method_name = format_ident!("{}", builder_attr.method_name);
+        *name.as_ref().unwrap() == method_name
+    } else {
+        return false;
+    }
+}
+#[proc_macro_derive(Builder, attributes(builder, footest))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let mut struct_name_builder;
@@ -119,22 +184,73 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     .map(|f| {
                         let name = &f.ident;
                         let ty = &f.ty;
-                        if is_optional_ty(ty) {
-                            let inner_ty = option_inner_ty(ty);
+                        let attrs = &f.attrs;
+                        let mut builder_attr: BuilderAttr = Default::default();
+                        if attrs.len() > 0
+                            && attrs[0].path.segments.first().unwrap().ident == "builder"
+                        {
+                            eprintln!(
+                                "===ATTRS=== path: {:?} tokens: {}",
+                                attrs[0].path, attrs[0].tokens
+                            );
+                            let attr_tokens = attrs[0].tokens.clone().into();
+                            builder_attr = syn::parse(attr_tokens).unwrap();
+                            eprintln!("attribute ident: {:?}", builder_attr.method_name);
+                            eprintln!(
+                                "===ATTRS=== path: {:?} tokens: {}",
+                                attrs[0].path, attrs[0].tokens
+                            );
+                        }
+                        let mut all_q: proc_macro2::TokenStream;
+
+                        // Generate the one-at-a-time build method
+                        let q = if builder_attr.method_name.len() > 0 {
+                            let method_name = format_ident!("{}", builder_attr.method_name);
+                            if *name.as_ref().unwrap() == method_name {
+                                builder_attr.is_same = true;
+                            }
+                            let method_type = vec_inner_ty(ty);
                             quote! {
-                                pub fn #name(&mut self, #name: #inner_ty) -> #struct_name_builder {
-                                    self.#name = Some(#name);
+                                pub fn #method_name(&mut self, #name: #method_type) -> #struct_name_builder {
+                                    let mut old_vec =  self.#name.take().unwrap_or_default();
+                                    old_vec.push(#name);
+                                    self.#name = Some(old_vec);
                                     self.clone()
                                 }
                             }
                         } else {
                             quote! {
-                                pub fn #name(&mut self, #name: #ty) -> #struct_name_builder {
-                                    self.#name = Some(#name);
-                                    self.clone()
+                            }
+                        };
+                       
+                        // Generate the build method, if the argument is an Option take the inner
+                        // type, not an Option type
+                        let q2 = if ! builder_attr.is_same {
+                            if is_optional_ty(ty) {
+                                let inner_ty = option_inner_ty(ty);
+                                quote! {
+                                    pub fn #name(&mut self, #name: #inner_ty) -> #struct_name_builder {
+                                        self.#name = Some(#name);
+                                        self.clone()
+                                    }
+                                }
+                            } else {
+                                quote! {
+                                    pub fn #name(&mut self, #name: #ty) -> #struct_name_builder {
+                                        self.#name = Some(#name);
+                                        self.clone()
+                                    }
                                 }
                             }
+                        } else {
+                            quote! {}
+                        };
+
+                        quote! {
+                            #q
+                            #q2
                         }
+
                     })
                     .collect(),
                 _ => unimplemented!(),
@@ -156,9 +272,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 })
                 .map(|f| {
                     let name = &f.ident;
-                    quote! {
-                        if let None = self.#name {
-                            return Err(String::from(stringify!(missing #name)).into());
+                    if has_builder_same_name(name, &f.attrs) {
+                        quote! {
+                        }
+                    } else {
+                        quote! {
+                            if let None = self.#name {
+                                return Err(String::from(stringify!(missing #name)).into());
+                            }
                         }
                     }
                 })
@@ -182,7 +303,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         }
                     } else {
                         quote! {
-                            #name : self.#name.unwrap(),
+                            #name : self.#name.unwrap_or_default(),
                         }
                     }
                 })

@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use quote::format_ident;
 use quote::quote;
+use quote::quote_spanned;
 use quote::TokenStreamExt;
 use syn::Error;
 use syn::{parenthesized, parse::Parse, parse::ParseStream, parse_macro_input, DeriveInput, Token};
@@ -76,7 +77,7 @@ impl Parse for BuilderAttr {
         eprintln!("content: {}", content);
         let ident: Ident = content.parse()?;
         if ident != "each" {
-            return Err(Error::new(ident.span(), "expected each"));
+            return syn::Result::Err(Error::new(ident.span(), "expected each"));
         }
         let equals: Token![=] = content.parse()?;
         let method_name: syn::LitStr = content.parse()?;
@@ -100,8 +101,11 @@ fn has_builder_same_name(name: &Option<Ident>, attrs: &Vec<syn::Attribute>) -> b
             attrs[0].path, attrs[0].tokens
         );
         let attr_tokens = attrs[0].tokens.clone().into();
-        let builder_attr : BuilderAttr = syn::parse(attr_tokens).unwrap();
-        let method_name = format_ident!("{}", builder_attr.method_name);
+        let builder_attr : Result<BuilderAttr, syn::Error> = syn::parse(attr_tokens);
+        if builder_attr.is_err() {
+            return false;
+        }
+        let method_name = format_ident!("{}", builder_attr.unwrap().method_name);
         *name.as_ref().unwrap() == method_name
     } else {
         return false;
@@ -186,6 +190,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         let ty = &f.ty;
                         let attrs = &f.attrs;
                         let mut builder_attr: BuilderAttr = Default::default();
+                        let mut my_compile_err_q = Default::default();
                         if attrs.len() > 0
                             && attrs[0].path.segments.first().unwrap().ident == "builder"
                         {
@@ -194,7 +199,21 @@ pub fn derive(input: TokenStream) -> TokenStream {
                                 attrs[0].path, attrs[0].tokens
                             );
                             let attr_tokens = attrs[0].tokens.clone().into();
-                            builder_attr = syn::parse(attr_tokens).unwrap();
+                            let builder_attr_result = syn::parse(attr_tokens);
+                            if builder_attr_result.is_err() {
+                                   eprintln!("got an error with builder attr");
+                                   match attrs[0].parse_meta() {
+                                       Ok(syn::Meta::List(mut nvs)) => {
+                                            let my_compile_error = syn::Error::new_spanned(nvs, "expected `builder(each = \"...\")`").to_compile_error();
+                                            my_compile_err_q = quote! {
+                                                #my_compile_error 
+                                            };
+                                       },
+                                       _ => {}
+                                   }
+                            } else {
+                                builder_attr = builder_attr_result.unwrap();
+                            }
                             eprintln!("attribute ident: {:?}", builder_attr.method_name);
                             eprintln!(
                                 "===ATTRS=== path: {:?} tokens: {}",
@@ -204,7 +223,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         let mut all_q: proc_macro2::TokenStream;
 
                         // Generate the one-at-a-time build method
-                        let q = if builder_attr.method_name.len() > 0 {
+                        let one_at_a_time_method = if builder_attr.method_name.len() > 0 {
                             let method_name = format_ident!("{}", builder_attr.method_name);
                             if *name.as_ref().unwrap() == method_name {
                                 builder_attr.is_same = true;
@@ -225,7 +244,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                        
                         // Generate the build method, if the argument is an Option take the inner
                         // type, not an Option type
-                        let q2 = if ! builder_attr.is_same {
+                        let all_at_once_method = if ! builder_attr.is_same {
                             if is_optional_ty(ty) {
                                 let inner_ty = option_inner_ty(ty);
                                 quote! {
@@ -247,8 +266,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         };
 
                         quote! {
-                            #q
-                            #q2
+                            #my_compile_err_q
+                            #one_at_a_time_method
+                            #all_at_once_method
                         }
 
                     })

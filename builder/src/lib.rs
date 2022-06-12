@@ -342,7 +342,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #struct_name_builder {
             #( #setter_methods )*
 
-            pub fn build(self) -> Result<#original_struct_name, Box<dyn std::error::Error>> {
+            pub fn build(self) -> std::result::Result<#original_struct_name, std::boxed::Box<dyn std::error::Error>> {
                 #( #check_has_values )*
                 Ok( #original_struct_name {
                     #( #fields_init )*
